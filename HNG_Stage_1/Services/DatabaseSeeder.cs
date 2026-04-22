@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using HNG_Stage_1.Data;
 using HNG_Stage_1.Models;
 using Microsoft.EntityFrameworkCore;
@@ -21,15 +22,14 @@ namespace HNG_Stage_1.Services
 
         public async Task SeedProfilesAsync(CancellationToken cancellationToken = default)
         {
-            var seedFilePath = Path.Combine(_environment.ContentRootPath, "SeedData", "profiles.json");
-            if (!File.Exists(seedFilePath))
+            var seedFilePath = ResolveSeedFilePath();
+            if (seedFilePath == null)
             {
-                _logger.LogInformation("Seed file not found at {SeedFilePath}. Skipping profile seed.", seedFilePath);
+                _logger.LogInformation("Seed file not found. Skipping profile seed.");
                 return;
             }
 
-            await using var stream = File.OpenRead(seedFilePath);
-            var seedProfiles = await JsonSerializer.DeserializeAsync<List<SeedProfile>>(stream, cancellationToken: cancellationToken);
+            var seedProfiles = await LoadSeedProfilesAsync(seedFilePath, cancellationToken);
             if (seedProfiles == null || seedProfiles.Count == 0)
             {
                 _logger.LogInformation("Seed file was empty. Skipping profile seed.");
@@ -78,16 +78,74 @@ namespace HNG_Stage_1.Services
             _logger.LogInformation("Seeded {Count} profiles.", profilesToInsert.Count);
         }
 
+        private string? ResolveSeedFilePath()
+        {
+            var candidatePaths = new[]
+            {
+                Path.Combine(_environment.ContentRootPath, "SeedData", "profiles.json"),
+                Path.Combine(AppContext.BaseDirectory, "SeedData", "profiles.json"),
+                Path.Combine(_environment.ContentRootPath, "HNG_Stage_1", "SeedData", "profiles.json")
+            };
+
+            var seedFilePath = candidatePaths.FirstOrDefault(File.Exists);
+            if (seedFilePath != null)
+            {
+                _logger.LogInformation("Using seed file at {SeedFilePath}.", seedFilePath);
+            }
+
+            return seedFilePath;
+        }
+
+        private static async Task<List<SeedProfile>?> LoadSeedProfilesAsync(string seedFilePath, CancellationToken cancellationToken)
+        {
+            var json = await File.ReadAllTextAsync(seedFilePath, cancellationToken);
+            var serializerOptions = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+
+            var document = JsonSerializer.Deserialize<SeedProfilesDocument>(json, serializerOptions);
+            if (document?.Profiles != null && document.Profiles.Count > 0)
+            {
+                return document.Profiles;
+            }
+
+            return JsonSerializer.Deserialize<List<SeedProfile>>(json, serializerOptions);
+        }
+
+        private class SeedProfilesDocument
+        {
+            [JsonPropertyName("profiles")]
+            public List<SeedProfile> Profiles { get; set; } = new();
+        }
+
         private class SeedProfile
         {
+            [JsonPropertyName("name")]
             public string Name { get; set; } = string.Empty;
+
+            [JsonPropertyName("gender")]
             public string Gender { get; set; } = string.Empty;
+
+            [JsonPropertyName("gender_probability")]
             public double GenderProbability { get; set; }
+
+            [JsonPropertyName("age")]
             public int Age { get; set; }
+
+            [JsonPropertyName("age_group")]
             public string AgeGroup { get; set; } = string.Empty;
+
+            [JsonPropertyName("country_id")]
             public string CountryId { get; set; } = string.Empty;
+
+            [JsonPropertyName("country_name")]
             public string CountryName { get; set; } = string.Empty;
+
+            [JsonPropertyName("country_probability")]
             public double CountryProbability { get; set; }
+
+            [JsonPropertyName("created_at")]
             public DateTime? CreatedAt { get; set; }
         }
     }

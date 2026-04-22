@@ -1,8 +1,6 @@
-using Microsoft.AspNetCore.Mvc;
-using System.Threading.Tasks;
-using System.Linq;
-using HNG_Stage_1.Services;
 using HNG_Stage_1.Models;
+using HNG_Stage_1.Services;
+using Microsoft.AspNetCore.Mvc;
 
 namespace HNG_Stage_1.Controllers
 {
@@ -19,48 +17,47 @@ namespace HNG_Stage_1.Controllers
 
         public class CreateProfileRequest
         {
-            public string? name { get; set; }
+            public string? Name { get; set; }
         }
 
         [HttpPost]
         public async Task<IActionResult> CreateProfile([FromBody] CreateProfileRequest? request)
         {
-            if (request == null || string.IsNullOrWhiteSpace(request.name))
+            if (request == null || string.IsNullOrWhiteSpace(request.Name))
             {
                 return BadRequest(new { status = "error", message = "Missing or empty name" });
             }
 
-            try
+            var result = await _profileService.CreateOrGetProfileAsync(request.Name);
+            if (result.IsCreated)
             {
-                var result = await _profileService.CreateOrGetProfileAsync(request.name);
+                return Created($"/api/profiles/{result.Profile.Id}", new
+                {
+                    status = "success",
+                    data = result.Profile
+                });
+            }
 
-                if (result.IsCreated)
-                {
-                    return Created($"/api/profiles/{result.Profile.Id}", new
-                    {
-                        status = "success",
-                        data = result.Profile
-                    });
-                }
-                else
-                {
-                    return Ok(new
-                    {
-                        status = "success",
-                        message = "Profile already exists",
-                        data = result.Profile
-                    });
-                }
-            }
-            catch (ValidationException ex)
+            return Ok(new
             {
-                return BadRequest(new { status = "error", message = ex.Message });
-            }
-            catch (ExternalApiException ex)
+                status = "success",
+                message = "Profile already exists",
+                data = result.Profile
+            });
+        }
+
+        [HttpGet("search")]
+        public async Task<IActionResult> SearchProfiles([FromQuery(Name = "q")] string? q, [FromQuery] int page = 1, [FromQuery] int limit = 10)
+        {
+            var result = await _profileService.SearchProfilesAsync(q ?? string.Empty, page, limit);
+            return Ok(new
             {
-                // This means one of the API calls returned invalid response or failed
-                return StatusCode(502, new { status = "error", message = ex.Message });
-            }
+                status = "success",
+                page = result.Page,
+                limit = result.Limit,
+                total = result.Total,
+                data = result.Data
+            });
         }
 
         [HttpGet("{id}")]
@@ -80,22 +77,41 @@ namespace HNG_Stage_1.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetAllProfiles([FromQuery] string? gender, [FromQuery] string? country_id, [FromQuery] string? age_group)
+        public async Task<IActionResult> GetAllProfiles(
+            [FromQuery(Name = "gender")] string? gender,
+            [FromQuery(Name = "age_group")] string? ageGroup,
+            [FromQuery(Name = "country_id")] string? countryId,
+            [FromQuery(Name = "min_age")] int? minAge,
+            [FromQuery(Name = "max_age")] int? maxAge,
+            [FromQuery(Name = "min_gender_probability")] double? minGenderProbability,
+            [FromQuery(Name = "min_country_probability")] double? minCountryProbability,
+            [FromQuery(Name = "sort_by")] string? sortBy,
+            [FromQuery(Name = "order")] string? order,
+            [FromQuery(Name = "page")] int page = 1,
+            [FromQuery(Name = "limit")] int limit = 10)
         {
-            var (count, data) = await _profileService.GetAllProfilesAsync(gender, country_id, age_group);
+            var result = await _profileService.GetProfilesAsync(new ProfileQueryParameters
+            {
+                Gender = gender,
+                AgeGroup = ageGroup,
+                CountryId = countryId,
+                MinAge = minAge,
+                MaxAge = maxAge,
+                MinGenderProbability = minGenderProbability,
+                MinCountryProbability = minCountryProbability,
+                SortBy = sortBy,
+                Order = order,
+                Page = page,
+                Limit = limit
+            });
 
             return Ok(new
             {
                 status = "success",
-                count = count,
-                data = data.Select(p => new {
-                    id = p.Id,
-                    name = p.Name,
-                    gender = p.Gender,
-                    age = p.Age,
-                    age_group = p.AgeGroup,
-                    country_id = p.CountryId
-                })
+                page = result.Page,
+                limit = result.Limit,
+                total = result.Total,
+                data = result.Data
             });
         }
 

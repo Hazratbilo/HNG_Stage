@@ -1,89 +1,77 @@
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Diagnostics;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using System.Text.Json;
 using HNG_Stage_1.Data;
 using HNG_Stage_1.Services;
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
 builder.Services.AddControllers()
     .ConfigureApiBehaviorOptions(options =>
     {
-        options.InvalidModelStateResponseFactory = context =>
-        {
-            var message = "Invalid type or missing parameters";
-            if (context.ModelState.ErrorCount > 0)
-            {
-                var firstError = context.ModelState.Values.SelectMany(v => v.Errors).FirstOrDefault();
-                if (firstError != null && !string.IsNullOrEmpty(firstError.ErrorMessage))
-                {
-                    message = firstError.ErrorMessage;
-                }
-            }
-
-            return new UnprocessableEntityObjectResult(new { status = "error", message });
-        };
+        options.InvalidModelStateResponseFactory = _ =>
+            new UnprocessableEntityObjectResult(new { status = "error", message = "Invalid query parameters" });
     });
 
-// Add DbContext
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=app.db"));
 
-// Register Services
-builder.Services.AddHttpClient<ExternalApiService>();
+builder.Services.AddHttpClient<IExternalApiService, ExternalApiService>();
 builder.Services.AddScoped<IProfileService, ProfileService>();
+builder.Services.AddSingleton<IProfileSearchQueryParser, ProfileSearchQueryParser>();
+builder.Services.AddScoped<DatabaseSeeder>();
+builder.Services.AddSingleton<DatabaseSchemaInitializer>();
 
-// Configure CORS - allow any origin
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowAll",
-        policy =>
-        {
-            policy.AllowAnyOrigin()
-                  .AllowAnyMethod()
-                  .AllowAnyHeader();
-        });
+    options.AddPolicy("AllowAll", policy =>
+    {
+        policy.AllowAnyOrigin()
+            .AllowAnyMethod()
+            .AllowAnyHeader();
+    });
 });
 
 var app = builder.Build();
 
-// Automatically apply migrations on startup
 using (var scope = app.Services.CreateScope())
 {
-    var _dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-    _dbContext.Database.Migrate();
+    var schemaInitializer = scope.ServiceProvider.GetRequiredService<DatabaseSchemaInitializer>();
+    await schemaInitializer.InitializeAsync();
+
+    var seeder = scope.ServiceProvider.GetRequiredService<DatabaseSeeder>();
+    await seeder.SeedProfilesAsync();
 }
 
-// Enable Global Error Handling
-app.UseExceptionHandler(exceptionHandlerApp =>
+app.UseExceptionHandler(errorApp =>
 {
-    exceptionHandlerApp.Run(async context =>
+    errorApp.Run(async context =>
     {
         context.Response.ContentType = "application/json";
-        
-        var exceptionHandlerPathFeature = context.Features.Get<IExceptionHandlerPathFeature>();
-        var exception = exceptionHandlerPathFeature?.Error;
 
-        if (exception is ExternalApiException externalEx)
+        var exception = context.Features.Get<IExceptionHandlerPathFeature>()?.Error;
+        switch (exception)
         {
-            context.Response.StatusCode = StatusCodes.Status502BadGateway;
-            await context.Response.WriteAsJsonAsync(new { status = "error", message = externalEx.Message });
-        }
-        else if (exception is ValidationException validationEx)
-        {
-            context.Response.StatusCode = StatusCodes.Status400BadRequest;
-            await context.Response.WriteAsJsonAsync(new { status = "error", message = validationEx.Message });
-        }
-        else
-        {
-            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            await context.Response.WriteAsJsonAsync(new { status = "error", message = "Internal Server Error" });
+            case ValidationException validationException:
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(new { status = "error", message = validationException.Message });
+                break;
+            case InvalidQueryParametersException invalidQueryParametersException:
+                context.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;
+                await context.Response.WriteAsJsonAsync(new { status = "error", message = invalidQueryParametersException.Message });
+                break;
+            case UnableToInterpretQueryException unableToInterpretQueryException:
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(new { status = "error", message = unableToInterpretQueryException.Message });
+                break;
+            case ExternalApiException externalApiException:
+                context.Response.StatusCode = StatusCodes.Status502BadGateway;
+                await context.Response.WriteAsJsonAsync(new { status = "error", message = externalApiException.Message });
+                break;
+            default:
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                await context.Response.WriteAsJsonAsync(new { status = "error", message = "Internal Server Error" });
+                break;
         }
     });
 });
@@ -91,9 +79,7 @@ app.UseExceptionHandler(exceptionHandlerApp =>
 app.UseCors("AllowAll");
 
 app.UseHttpsRedirection();
-
 app.UseAuthorization();
-
 app.MapControllers();
 
 app.Run();

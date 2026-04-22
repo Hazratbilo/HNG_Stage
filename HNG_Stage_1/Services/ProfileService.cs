@@ -1,10 +1,6 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using Microsoft.EntityFrameworkCore;
 using HNG_Stage_1.Data;
 using HNG_Stage_1.Models;
+using Microsoft.EntityFrameworkCore;
 using UUIDNext;
 
 namespace HNG_Stage_1.Services
@@ -14,60 +10,78 @@ namespace HNG_Stage_1.Services
         public ValidationException(string message) : base(message) { }
     }
 
+    public class InvalidQueryParametersException : Exception
+    {
+        public InvalidQueryParametersException(string message) : base(message) { }
+    }
+
+    public class UnableToInterpretQueryException : Exception
+    {
+        public UnableToInterpretQueryException(string message) : base(message) { }
+    }
+
     public class ProfileService : IProfileService
     {
-        private readonly ApplicationDbContext _dbContext;
-        private readonly ExternalApiService _externalApiService;
+        private const int MaxLimit = 50;
 
-        // Using ExternalApiService directly since it has the specific return type matching our setup,
-        // or we could use IExternalApiService if we registered the specific interface correctly.
-        public ProfileService(ApplicationDbContext dbContext, ExternalApiService externalApiService)
+        private readonly ApplicationDbContext _dbContext;
+        private readonly IExternalApiService _externalApiService;
+        private readonly IProfileSearchQueryParser _profileSearchQueryParser;
+
+        public ProfileService(
+            ApplicationDbContext dbContext,
+            IExternalApiService externalApiService,
+            IProfileSearchQueryParser profileSearchQueryParser)
         {
             _dbContext = dbContext;
             _externalApiService = externalApiService;
+            _profileSearchQueryParser = profileSearchQueryParser;
         }
 
         public async Task<(Profile Profile, bool IsCreated)> CreateOrGetProfileAsync(string name)
         {
             if (string.IsNullOrWhiteSpace(name))
             {
-                throw new ValidationException("name must be provided");
+                throw new ValidationException("Missing or empty name");
             }
 
-            var lowerName = name.ToLowerInvariant();
+            var normalizedName = name.Trim().ToLowerInvariant();
 
-            // Check if exists
             var existingProfile = await _dbContext.Profiles
-                .FirstOrDefaultAsync(p => p.Name.ToLower() == lowerName);
+                .FirstOrDefaultAsync(profile => profile.Name == normalizedName);
 
             if (existingProfile != null)
             {
                 return (existingProfile, false);
             }
 
-            // Fetch from APIs
-            var (genderize, agify, nationalize) = await _externalApiService.FetchAllDataAsync(lowerName);
+            var (genderize, agify, nationalize) = await _externalApiService.FetchAllDataAsync(normalizedName);
+            if (!agify.Age.HasValue)
+            {
+                throw new ExternalApiException("Agify returned an invalid response");
+            }
 
-            // Classification
-            string ageGroup = ClassifyAgeGroup(agify.Age.Value);
-            var bestCountry = nationalize.Country.OrderByDescending(c => c.Probability).FirstOrDefault();
+            var bestCountry = nationalize.Country
+                .OrderByDescending(country => country.Probability)
+                .FirstOrDefault();
 
             if (bestCountry == null)
             {
                 throw new ExternalApiException("Nationalize returned an invalid response");
             }
 
-            // Create new profile
+            var countryName = ResolveCountryName(bestCountry.Country_id);
+
             var profile = new Profile
             {
-                Id = Uuid.NewSequential().ToString(), // UUID v7 equivalent in UUIDNext
-                Name = lowerName,
-                Gender = genderize.Gender!,
+                Id = Uuid.NewSequential().ToString(),
+                Name = normalizedName,
+                Gender = genderize.Gender!.ToLowerInvariant(),
                 GenderProbability = genderize.Probability,
-                SampleSize = genderize.Count,
                 Age = agify.Age.Value,
-                AgeGroup = ageGroup,
-                CountryId = bestCountry.Country_id,
+                AgeGroup = ClassifyAgeGroup(agify.Age.Value),
+                CountryId = bestCountry.Country_id.ToUpperInvariant(),
+                CountryName = countryName,
                 CountryProbability = bestCountry.Probability,
                 CreatedAt = DateTime.UtcNow
             };
@@ -78,53 +92,210 @@ namespace HNG_Stage_1.Services
             return (profile, true);
         }
 
-        public async Task<Profile?> GetProfileByIdAsync(string id)
+        public Task<Profile?> GetProfileByIdAsync(string id) =>
+            _dbContext.Profiles.FirstOrDefaultAsync(profile => profile.Id == id);
+
+        public Task<PagedProfilesResult> GetProfilesAsync(ProfileQueryParameters parameters) =>
+            QueryProfilesAsync(parameters);
+
+        public async Task<PagedProfilesResult> SearchProfilesAsync(string query, int page, int limit)
         {
-            return await _dbContext.Profiles.FirstOrDefaultAsync(p => p.Id == id);
-        }
-
-        public async Task<(int Count, List<Profile> Data)> GetAllProfilesAsync(string? gender, string? countryId, string? ageGroup)
-        {
-            var query = _dbContext.Profiles.AsQueryable();
-
-            if (!string.IsNullOrWhiteSpace(gender))
+            if (string.IsNullOrWhiteSpace(query))
             {
-                var lowerGender = gender.ToLowerInvariant();
-                query = query.Where(p => p.Gender.ToLower() == lowerGender);
+                throw new ValidationException("Missing or empty parameter");
             }
 
-            if (!string.IsNullOrWhiteSpace(countryId))
+            if (!_profileSearchQueryParser.TryParse(query, out var filters))
             {
-                var lowerCountryId = countryId.ToLowerInvariant();
-                query = query.Where(p => p.CountryId.ToLower() == lowerCountryId);
+                throw new UnableToInterpretQueryException("Unable to interpret query");
             }
 
-            if (!string.IsNullOrWhiteSpace(ageGroup))
-            {
-                var lowerAgeGroup = ageGroup.ToLowerInvariant();
-                query = query.Where(p => p.AgeGroup.ToLower() == lowerAgeGroup);
-            }
+            filters.Page = page;
+            filters.Limit = limit;
 
-            var results = await query.ToListAsync();
-            return (results.Count, results);
+            return await QueryProfilesAsync(filters);
         }
 
         public async Task<bool> DeleteProfileAsync(string id)
         {
-            var profile = await _dbContext.Profiles.FirstOrDefaultAsync(p => p.Id == id);
-            if (profile == null) return false;
+            var profile = await _dbContext.Profiles.FirstOrDefaultAsync(candidate => candidate.Id == id);
+            if (profile == null)
+            {
+                return false;
+            }
 
             _dbContext.Profiles.Remove(profile);
             await _dbContext.SaveChangesAsync();
             return true;
         }
 
-        private string ClassifyAgeGroup(int age)
+        private async Task<PagedProfilesResult> QueryProfilesAsync(ProfileQueryParameters parameters)
         {
-            if (age >= 0 && age <= 12) return "child";
-            if (age >= 13 && age <= 19) return "teenager";
-            if (age >= 20 && age <= 59) return "adult";
-            return "senior"; // 60+
+            ValidateQueryParameters(parameters);
+
+            IQueryable<Profile> query = _dbContext.Profiles.AsNoTracking();
+
+            if (!string.IsNullOrWhiteSpace(parameters.Gender))
+            {
+                var gender = parameters.Gender.Trim().ToLowerInvariant();
+                query = query.Where(profile => profile.Gender == gender);
+            }
+
+            if (!string.IsNullOrWhiteSpace(parameters.AgeGroup))
+            {
+                var ageGroup = parameters.AgeGroup.Trim().ToLowerInvariant();
+                query = query.Where(profile => profile.AgeGroup == ageGroup);
+            }
+
+            if (!string.IsNullOrWhiteSpace(parameters.CountryId))
+            {
+                var countryId = parameters.CountryId.Trim().ToUpperInvariant();
+                query = query.Where(profile => profile.CountryId == countryId);
+            }
+
+            if (parameters.MinAge.HasValue)
+            {
+                query = query.Where(profile => profile.Age >= parameters.MinAge.Value);
+            }
+
+            if (parameters.MaxAge.HasValue)
+            {
+                query = query.Where(profile => profile.Age <= parameters.MaxAge.Value);
+            }
+
+            if (parameters.MinGenderProbability.HasValue)
+            {
+                query = query.Where(profile => profile.GenderProbability >= parameters.MinGenderProbability.Value);
+            }
+
+            if (parameters.MinCountryProbability.HasValue)
+            {
+                query = query.Where(profile => profile.CountryProbability >= parameters.MinCountryProbability.Value);
+            }
+
+            query = ApplySorting(query, parameters.SortBy, parameters.Order);
+
+            var total = await query.CountAsync();
+            var data = await query
+                .Skip((parameters.Page - 1) * parameters.Limit)
+                .Take(parameters.Limit)
+                .ToListAsync();
+
+            return new PagedProfilesResult
+            {
+                Page = parameters.Page,
+                Limit = parameters.Limit,
+                Total = total,
+                Data = data
+            };
+        }
+
+        private static IQueryable<Profile> ApplySorting(IQueryable<Profile> query, string? sortBy, string? order)
+        {
+            var normalizedSortBy = string.IsNullOrWhiteSpace(sortBy) ? "created_at" : sortBy.Trim().ToLowerInvariant();
+            var normalizedOrder = string.IsNullOrWhiteSpace(order) ? "asc" : order.Trim().ToLowerInvariant();
+            var descending = normalizedOrder == "desc";
+
+            return normalizedSortBy switch
+            {
+                "age" => descending ? query.OrderByDescending(profile => profile.Age).ThenBy(profile => profile.Name)
+                    : query.OrderBy(profile => profile.Age).ThenBy(profile => profile.Name),
+                "gender_probability" => descending ? query.OrderByDescending(profile => profile.GenderProbability).ThenBy(profile => profile.Name)
+                    : query.OrderBy(profile => profile.GenderProbability).ThenBy(profile => profile.Name),
+                _ => descending ? query.OrderByDescending(profile => profile.CreatedAt).ThenBy(profile => profile.Name)
+                    : query.OrderBy(profile => profile.CreatedAt).ThenBy(profile => profile.Name)
+            };
+        }
+
+        private static void ValidateQueryParameters(ProfileQueryParameters parameters)
+        {
+            var normalizedGender = parameters.Gender?.Trim().ToLowerInvariant();
+            var normalizedAgeGroup = parameters.AgeGroup?.Trim().ToLowerInvariant();
+            var normalizedCountryId = parameters.CountryId?.Trim().ToUpperInvariant();
+            var normalizedSortBy = parameters.SortBy?.Trim().ToLowerInvariant();
+            var normalizedOrder = parameters.Order?.Trim().ToLowerInvariant();
+
+            if (parameters.Page < 1 || parameters.Limit < 1 || parameters.Limit > MaxLimit)
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (parameters.MinAge.HasValue && parameters.MinAge < 0)
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (parameters.MaxAge.HasValue && parameters.MaxAge < 0)
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (parameters.MinAge.HasValue && parameters.MaxAge.HasValue && parameters.MinAge > parameters.MaxAge)
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (!string.IsNullOrWhiteSpace(normalizedGender) &&
+                normalizedGender is not ("male" or "female"))
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (!string.IsNullOrWhiteSpace(normalizedAgeGroup) &&
+                normalizedAgeGroup is not ("child" or "teenager" or "adult" or "senior"))
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (!string.IsNullOrWhiteSpace(normalizedCountryId) &&
+                (normalizedCountryId.Length != 2 || !normalizedCountryId.All(char.IsLetter)))
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (parameters.MinGenderProbability.HasValue &&
+                (parameters.MinGenderProbability < 0 || parameters.MinGenderProbability > 1))
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (parameters.MinCountryProbability.HasValue &&
+                (parameters.MinCountryProbability < 0 || parameters.MinCountryProbability > 1))
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (!string.IsNullOrWhiteSpace(normalizedSortBy) &&
+                normalizedSortBy is not ("age" or "created_at" or "gender_probability"))
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+
+            if (!string.IsNullOrWhiteSpace(normalizedOrder) &&
+                normalizedOrder is not ("asc" or "desc"))
+            {
+                throw new InvalidQueryParametersException("Invalid query parameters");
+            }
+        }
+
+        private static string ClassifyAgeGroup(int age)
+        {
+            if (age <= 12) return "child";
+            if (age <= 19) return "teenager";
+            if (age <= 59) return "adult";
+            return "senior";
+        }
+
+        private static string ResolveCountryName(string countryCode)
+        {
+            try
+            {
+                return new System.Globalization.RegionInfo(countryCode.ToUpperInvariant()).EnglishName;
+            }
+            catch (ArgumentException)
+            {
+                return countryCode.ToUpperInvariant();
+            }
         }
     }
 }

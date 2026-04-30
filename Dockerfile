@@ -16,8 +16,8 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
 
 # Configure ports and environment
-ENV ASPNETCORE_URLS="http://+:80"
-EXPOSE 80
+# Railway will automatically set the PORT environment variable
+EXPOSE 8080
 
 COPY --from=build /app/publish ./
 

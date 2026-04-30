@@ -167,6 +167,27 @@ namespace HNG_Stage_1.Services
                 country_probability REAL NOT NULL,
                 created_at TEXT NOT NULL
             );
+            
+            CREATE TABLE IF NOT EXISTS "users" (
+                "id" TEXT NOT NULL PRIMARY KEY,
+                "github_id" TEXT NOT NULL,
+                "username" TEXT NOT NULL,
+                "email" TEXT,
+                "avatar_url" TEXT,
+                "role" TEXT NOT NULL,
+                "is_active" INTEGER NOT NULL,
+                "last_login_at" TEXT,
+                "created_at" TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS "refresh_tokens" (
+                "Token" TEXT NOT NULL PRIMARY KEY,
+                "UserId" TEXT NOT NULL,
+                "ExpiryDate" TEXT NOT NULL,
+                "IsRevoked" INTEGER NOT NULL,
+                "IsUsed" INTEGER NOT NULL,
+                "CreatedAt" TEXT NOT NULL
+            );
             """;
 
         private static string ResolveSourceColumn(HashSet<string> columns, params string[] candidates)

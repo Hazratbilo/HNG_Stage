@@ -1,0 +1,8 @@
+$env:Jwt__Key="f8c2b9a1d6e4f3c7a8b5d2e9c1f7a4b3e6d8c9a2f5b1e7d3c4a6f9b2e8c1d7a5"
+$env:Jwt__Issuer="InsightaLabs"
+$env:Jwt__Audience="InsightaLabsUsers"
+$env:GitHub__ClientId="Ov23liuKHWZ2vyHeRV4H"
+$env:GitHub__ClientSecret="032ab5e88a67fa0b179b37d43e81a3c55f8bd444"
+$env:Frontend__BaseUrl="http://localhost:5173"
+$env:Cors__AllowedOrigins__0="http://localhost:5173"
+$env:BootstrapAdmin__GitHubIds__0="190068845"

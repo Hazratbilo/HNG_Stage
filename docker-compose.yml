@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  hng_stage_1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hng_stage_1:latest
+    ports:
+      - "8080:80"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - Jwt__Key=${JWT_KEY}
+      - GitHub__ClientId=${GITHUB_CLIENT_ID}
+      - GitHub__ClientSecret=${GITHUB_CLIENT_SECRET}
+    env_file:
+      - .env
+    restart: unless-stopped

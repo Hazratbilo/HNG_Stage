@@ -8,6 +8,8 @@ namespace HNG_Stage_1.Data
         public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options) { }
 
         public DbSet<Profile> Profiles { get; set; }
+        public DbSet<User> Users { get; set; }
+        public DbSet<RefreshToken> RefreshTokens { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -32,6 +34,26 @@ namespace HNG_Stage_1.Data
             profile.HasIndex(p => new { p.Gender, p.AgeGroup, p.CountryId });
             profile.HasIndex(p => p.Age);
             profile.HasIndex(p => p.CreatedAt);
+
+            var user = modelBuilder.Entity<User>();
+            user.ToTable("users");
+            user.HasKey(u => u.Id);
+            user.Property(u => u.Id).HasColumnName("id");
+            user.Property(u => u.GithubId).HasColumnName("github_id");
+            user.Property(u => u.Username).HasColumnName("username");
+            user.Property(u => u.Email).HasColumnName("email");
+            user.Property(u => u.AvatarUrl).HasColumnName("avatar_url");
+            user.Property(u => u.Role).HasColumnName("role");
+            user.Property(u => u.IsActive).HasColumnName("is_active");
+            user.Property(u => u.LastLoginAt).HasColumnName("last_login_at");
+            user.Property(u => u.CreatedAt).HasColumnName("created_at");
+
+            user.HasIndex(u => u.GithubId).IsUnique();
+
+            var token = modelBuilder.Entity<RefreshToken>();
+            token.ToTable("refresh_tokens");
+            token.HasKey(t => t.Token);
+            token.HasIndex(t => t.UserId);
         }
     }
 }

@@ -1,275 +1,208 @@
-# HNG Stage 1 API
+# Insighta Labs+ Stage 3
 
-`HNG Stage 1` is an ASP.NET Core Web API that creates and stores lightweight name-based profile records. When a new name is submitted, the service calls three public enrichment APIs:
+Insighta Labs+ is a profile intelligence platform built on top of the Stage 2 profile system. It keeps the existing filtering, sorting, pagination, and natural-language search behavior, then adds secure authentication, session handling, role-based access, a browser portal, and a globally installable CLI.
 
-- `Genderize` to predict gender
-- `Agify` to estimate age
-- `Nationalize` to infer the most likely country
+## Repositories
 
-The enriched result is saved to a local SQLite database and returned to the client. If the same name is submitted again, the existing profile is returned instead of creating a duplicate.
+This workspace currently contains three projects:
 
-## Features
+- `HNG_Stage_1/` - ASP.NET Core backend API
+- `insighta-cli/` - Node.js CLI
+- `insighta-web/` - React web portal
 
-- Create a profile from a single `name`
-- Reuse an existing profile for duplicate names
-- Fetch one profile by ID
-- List all saved profiles
-- Filter profiles by `gender`, `country_id`, and `age_group`
-- Delete a profile by ID
-- Persist data with `Entity Framework Core` and `SQLite`
-- Run locally with `.NET 8` or in Docker
+For submission, publish each project as its own repository.
 
-## Tech Stack
+## System Architecture
 
-- `ASP.NET Core 8`
-- `Entity Framework Core`
-- `SQLite`
-- `UUIDNext`
-- `Docker`
+The backend is the single source of truth. Both clients talk to the same API and share the same authorization rules.
 
-## Project Structure
+- The backend stores profiles, users, and refresh tokens in SQLite.
+- The backend enriches new profiles with `Genderize`, `Agify`, and `Nationalize`.
+- The CLI authenticates with GitHub OAuth + PKCE, stores tokens in `~/.insighta/credentials.json`, and sends bearer tokens on API requests.
+- The web portal authenticates with GitHub OAuth + PKCE, stores access and refresh tokens in HTTP-only cookies, and uses a CSRF token cookie + header for unsafe requests.
+
+## Authentication Flow
+
+### Browser flow
+
+1. The user clicks `Continue with GitHub` in the portal.
+2. The backend generates a PKCE verifier and OAuth state, stores both in HTTP-only cookies, and redirects to GitHub.
+3. GitHub redirects back to the backend callback.
+4. The backend validates the OAuth state, exchanges the code with GitHub, creates or updates the local user, and issues:
+   - a short-lived access token in an HTTP-only cookie
+   - a short-lived refresh token in an HTTP-only cookie
+   - a CSRF token cookie for unsafe browser requests
+5. The backend redirects the user back to the frontend dashboard.
+
+### CLI flow
+
+1. The CLI starts a temporary localhost callback server.
+2. The CLI generates `state`, `code_verifier`, and `code_challenge`.
+3. The CLI fetches the GitHub client id from the backend, opens the GitHub consent page, and uses the localhost callback as the redirect URI.
+4. After GitHub redirects to the local callback, the CLI validates the returned state locally.
+5. The CLI sends the GitHub code and PKCE verifier to the backend callback endpoint.
+6. The backend exchanges the code, creates or updates the local user, and returns access and refresh tokens in JSON.
+
+## Token Handling Approach
+
+- Access tokens are JWTs signed by the backend and expire after `3 minutes`.
+- Refresh tokens are random opaque strings stored server-side and expire after `5 minutes`.
+- Refresh tokens are single-use. Once a refresh happens, the old token is marked as used and a new refresh token is issued.
+- CLI credentials are stored in `~/.insighta/credentials.json`.
+- Browser credentials are stored in HTTP-only cookies, so JavaScript cannot read the access or refresh tokens directly.
+- Browser refresh and logout requests require a CSRF token header that matches the CSRF cookie.
+
+## Role Enforcement Logic
+
+Two roles are supported:
+
+- `analyst`
+- `admin`
+
+Rules:
+
+- All `/api/profiles` endpoints require authentication.
+- `admin` is required for `POST /api/profiles` and `DELETE /api/profiles/{id}`.
+- `analyst` and `admin` can read profiles, search, and export CSV.
+- New users default to `analyst` unless their GitHub id, username, or email matches the configured bootstrap admin lists.
+
+Configure bootstrap admins with environment-backed settings:
+
+- `BootstrapAdmin__GitHubIds__0`
+- `BootstrapAdmin__Usernames__0`
+- `BootstrapAdmin__Emails__0`
+
+## API Versioning
+
+Protected profile endpoints require:
 
 ```text
-HNG_Stage_1/
-|-- HNG_Stage_1.slnx
-|-- README.md
-`-- HNG_Stage_1/
-    |-- Controllers/
-    |-- Data/
-    |-- Migrations/
-    |-- Models/
-    |-- Services/
-    |-- Program.cs
-    |-- Dockerfile
-    `-- app.db
+X-API-Version: 1
 ```
 
-## How It Works
+The response pagination shape is:
 
-1. A client sends a `POST /api/profiles` request with a name.
-2. The service checks whether that name already exists in the database.
-3. If it does not exist, the app calls:
-   - `https://api.genderize.io`
-   - `https://api.agify.io`
-   - `https://api.nationalize.io`
-4. The app combines the results into a single profile object.
-5. The record is stored in SQLite and returned to the client.
+```json
+{
+  "status": "success",
+  "page": 1,
+  "limit": 10,
+  "total": 42,
+  "total_pages": 5,
+  "links": {
+    "self": "/api/profiles?page=1&limit=10",
+    "next": "/api/profiles?page=2&limit=10",
+    "prev": null
+  },
+  "data": []
+}
+```
 
-## Requirements
+## Natural Language Parsing Approach
 
-Before running the project locally, make sure you have:
+The natural-language search feature from Stage 2 remains in place. The backend parser converts user-friendly phrases such as:
 
-- `.NET SDK 8.0`
-- `Docker` (optional, for containerized runs)
-- Internet access for the external enrichment APIs
+```text
+young females in nigeria
+```
 
-## Local Setup
+into the structured filters already supported by the query layer, including gender, age group, and country. If the parser cannot confidently map a phrase to known filters, the backend returns a structured `400` error.
 
-1. Clone the repository:
+## Security Controls
+
+- GitHub OAuth with PKCE for both clients
+- OAuth state validation for browser sign-in
+- JWT access tokens with short expiry
+- Server-stored rotating refresh tokens
+- Role-based authorization policies
+- HTTP-only cookies for browser auth
+- CSRF protection for cookie-authenticated unsafe requests
+- Fixed-window rate limiting for auth and API traffic
+- Request logging middleware
+- CORS restricted to configured frontend origins
+
+## Backend Setup
+
+### Required configuration
+
+Set these values with environment variables or a secure secret store:
+
+```text
+Jwt__Key=<strong-random-32-byte-minimum-secret>
+Jwt__Issuer=InsightaLabs
+Jwt__Audience=InsightaLabsUsers
+GitHub__ClientId=<github-oauth-client-id>
+GitHub__ClientSecret=<github-oauth-client-secret>
+Frontend__BaseUrl=http://localhost:5173
+Cors__AllowedOrigins__0=http://localhost:5173
+BootstrapAdmin__GitHubIds__0=<optional-github-id>
+```
+
+For local PowerShell setup, a starter template is available at [HNG_Stage_1/env.example.ps1](/C:/Users/ALATOYE%20BILAL/source/repos/HNG_Stage_1/HNG_Stage_1/env.example.ps1).
+
+### Run locally
 
 ```bash
-git clone <your-repository-url>
 cd HNG_Stage_1
-```
-
-2. Move into the application folder:
-
-```bash
-cd HNG_Stage_1
-```
-
-3. Restore dependencies:
-
-```bash
 dotnet restore
-```
-
-4. Run the API:
-
-```bash
 dotnet run
 ```
 
-By default, the development profiles are configured to run on:
+## CLI Usage
 
-- `http://localhost:5010`
-- `https://localhost:7090`
-
-## Database
-
-The application uses SQLite with a local database file:
-
-```text
-HNG_Stage_1/app.db
-```
-
-Entity Framework migrations are applied automatically on startup, so the database schema is created or updated when the app launches.
-
-## API Endpoints
-
-Base route:
-
-```text
-/api/profiles
-```
-
-### Create Profile
-
-`POST /api/profiles`
-
-Request body:
-
-```json
-{
-  "name": "john"
-}
-```
-
-Possible responses:
-
-- `201 Created` when a new profile is saved
-- `200 OK` when the profile already exists
-- `400 Bad Request` for missing or empty name
-- `502 Bad Gateway` when one of the external APIs fails
-
-Example success response:
-
-```json
-{
-  "status": "success",
-  "data": {
-    "id": "01963c7e-b1d7-7c2e-a1b2-123456789abc",
-    "name": "john",
-    "gender": "male",
-    "gender_probability": 0.99,
-    "sample_size": 12345,
-    "age": 34,
-    "age_group": "adult",
-    "country_id": "US",
-    "country_probability": 0.12,
-    "created_at": "2026-04-17T10:00:00Z"
-  }
-}
-```
-
-### Get Profile By ID
-
-`GET /api/profiles/{id}`
-
-Example:
+### Install locally for global usage
 
 ```bash
-curl http://localhost:5010/api/profiles/<profile-id>
+cd insighta-cli
+npm install
+npm link
 ```
 
-Responses:
-
-- `200 OK` when found
-- `404 Not Found` when the ID does not exist
-
-### List Profiles
-
-`GET /api/profiles`
-
-Optional query parameters:
-
-- `gender`
-- `country_id`
-- `age_group`
-
-Examples:
+### Configure backend base URL
 
 ```bash
-curl http://localhost:5010/api/profiles
-curl "http://localhost:5010/api/profiles?gender=male"
-curl "http://localhost:5010/api/profiles?country_id=US&age_group=adult"
+set INSIGHTA_API_URL=https://localhost:7198
 ```
 
-Example response:
-
-```json
-{
-  "status": "success",
-  "count": 2,
-  "data": [
-    {
-      "id": "01963c7e-b1d7-7c2e-a1b2-123456789abc",
-      "name": "john",
-      "gender": "male",
-      "age": 34,
-      "age_group": "adult",
-      "country_id": "US"
-    }
-  ]
-}
-```
-
-### Delete Profile
-
-`DELETE /api/profiles/{id}`
-
-Responses:
-
-- `204 No Content` when deleted successfully
-- `404 Not Found` when the ID does not exist
-
-## Running With Docker
-
-From the application directory:
+### Commands
 
 ```bash
-cd HNG_Stage_1
-docker build -t hng-stage-1-api .
-docker run -p 8080:8080 hng-stage-1-api
+insighta login
+insighta whoami
+insighta profiles list --page 1 --limit 10
+insighta profiles search "young males from nigeria"
+insighta profiles get <profile-id>
+insighta profiles create --name john
+insighta profiles export --format csv
+insighta logout
 ```
 
-The API will be available at:
+## Web Portal Usage
+
+```bash
+cd insighta-web
+npm install
+npm run dev
+```
+
+Optional environment variable:
 
 ```text
-http://localhost:8080
+VITE_API_BASE_URL=https://localhost:7198
 ```
 
-## Error Handling
+You can start from [insighta-web/.env.example](/C:/Users/ALATOYE%20BILAL/source/repos/HNG_Stage_1/insighta-web/.env.example).
 
-The API returns structured JSON error responses in this format:
+## CSV Export
 
-```json
-{
-  "status": "error",
-  "message": "Description of the error"
-}
-```
+CSV export is available through:
 
-Examples include:
-
-- missing request data
-- invalid external API responses
-- internal server errors
+- `GET /api/profiles/export?format=csv` for authenticated users
+- `insighta profiles export --format csv` in the CLI
+- the `Export CSV` action in the web portal
 
 ## Notes
 
-- Profile names are normalized to lowercase before storage.
-- A unique index is configured on the `Name` field.
-- CORS is currently configured to allow any origin, method, and header.
-- HTTPS redirection is enabled in the application pipeline.
-- Swagger/OpenAPI is not currently configured in this project.
-
-## Quick Test With cURL
-
-Create a profile:
-
-```bash
-curl -X POST http://localhost:5010/api/profiles \
-  -H "Content-Type: application/json" \
-  -d "{\"name\":\"john\"}"
-```
-
-List profiles:
-
-```bash
-curl http://localhost:5010/api/profiles
-```
-
-## License
-
-This project is available for learning, assessment, and further extension. Add a license file if you plan to distribute it publicly.
+- The backend currently uses SQLite for local development.
+- Refresh token rotation is enforced server-side.
+- The workspace should not commit production secrets, generated databases, or `node_modules`.

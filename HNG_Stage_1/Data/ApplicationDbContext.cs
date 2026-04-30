@@ -1,5 +1,6 @@
 using HNG_Stage_1.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace HNG_Stage_1.Data
 {
@@ -28,7 +29,13 @@ namespace HNG_Stage_1.Data
             profile.Property(p => p.CountryId).HasColumnName("country_id").HasMaxLength(2).IsRequired();
             profile.Property(p => p.CountryName).HasColumnName("country_name").IsRequired();
             profile.Property(p => p.CountryProbability).HasColumnName("country_probability");
-            profile.Property(p => p.CreatedAt).HasColumnName("created_at");
+            var utcDateTimeConverter = new ValueConverter<DateTime, DateTime>(
+                value => value.Kind == DateTimeKind.Utc ? value : value.ToUniversalTime(),
+                value => value.Kind == DateTimeKind.Utc ? value : DateTime.SpecifyKind(value, DateTimeKind.Utc));
+
+            profile.Property(p => p.CreatedAt)
+                .HasColumnName("created_at")
+                .HasConversion(utcDateTimeConverter);
 
             profile.HasIndex(p => p.Name).IsUnique();
             profile.HasIndex(p => new { p.Gender, p.AgeGroup, p.CountryId });

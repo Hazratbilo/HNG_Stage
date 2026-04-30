@@ -365,3 +365,7 @@ FodyWeavers.xsd
 # Environment Variables
 .env
 .env.*
+
+# Database files
+*.db
+app.db
